@@ -57,11 +57,21 @@ function validateMappingSetup() {
     
     // マッピングデータの妥当性チェック
     const mappingValidation = validateMappingData(mappingData);
+    
+    // エラーがある場合は処理停止、警告のみの場合は処理継続
     if (!mappingValidation.isValid) {
-      const errorMessage = 'マッピングデータに問題があります:\n\n' + 
+      const errorMessage = 'マッピングデータにエラーがあります:\n\n' + 
                           mappingValidation.errors.join('\n');
       showError(errorMessage);
       return;
+    }
+    
+    // 警告がある場合は表示するが処理は継続
+    if (mappingValidation.warnings && mappingValidation.warnings.length > 0) {
+      const warningMessage = '【警告】マッピングデータに以下の注意事項があります:\n\n' + 
+                            mappingValidation.warnings.join('\n') + 
+                            '\n\n処理は継続されます。';
+      console.warn(warningMessage);
     }
     
     // フォーマットA入力シートとの整合性チェック
@@ -80,15 +90,24 @@ function validateMappingSetup() {
       }
       
       if (headerValidation.warnings.length > 0) {
-        message += '📝 注意事項:\n';
+        message += '【警告】以下の注意事項があります:\n';
         message += headerValidation.warnings.map(warning => `  - ${warning}`).join('\n');
         message += '\n\n';
       }
       
-      if (headerValidation.isValid && headerValidation.warnings.length === 0) {
+      if (mappingValidation.warnings && mappingValidation.warnings.length > 0) {
+        message += '【警告】マッピングデータの注意事項:\n';
+        message += mappingValidation.warnings.map(warning => `  - ${warning}`).join('\n');
+        message += '\n\n';
+      }
+      
+      if (headerValidation.isValid && 
+          headerValidation.warnings.length === 0 && 
+          (!mappingValidation.warnings || mappingValidation.warnings.length === 0)) {
         message += '✅ すべての検証に合格しました！';
         showSuccess(message);
       } else {
+        message += '⚠️ 警告がありますが、処理は実行可能です。';
         showWarning(message);
       }
     } else {

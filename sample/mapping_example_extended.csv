@@ -1,0 +1,11 @@
+フォーマットA項目名,フォーマットB項目名,変換タイプ,設定値
+出荷日,shipping_date,NORMAL,
+顧客名,customer_name,NORMAL,
+住所1+住所2+住所3,full_address,CONCAT,
+商品コード,,NORMAL,
+数量,quantity,NORMAL,
+単価,unit_price,NORMAL,
+[FIXED:処理済み],status,FIXED,
+[FIXED],created_by,FIXED,システム自動
+備考,notes,NORMAL,
+合計金額,,NORMAL,

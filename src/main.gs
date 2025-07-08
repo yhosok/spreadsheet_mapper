@@ -40,11 +40,31 @@ function executeFormatConversion() {
       return;
     }
     
+    // マッピングデータの妥当性チェック（緩和版）
+    const mappingValidation = validateMappingData(mappingData);
+    if (!mappingValidation.isValid) {
+      const errorMessage = 'マッピングデータにエラーがあります:\n\n' + 
+                          mappingValidation.errors.join('\n');
+      showError(errorMessage);
+      return;
+    }
+    
+    // 警告がある場合はログ出力するが処理は継続
+    if (mappingValidation.warnings && mappingValidation.warnings.length > 0) {
+      console.warn('マッピング検証で警告が発生しましたが、処理を継続します:', mappingValidation.warnings);
+    }
+    
     // フォーマットA入力データの取得
     const inputData = getInputData();
-    if (!inputData || inputData.length === 0) {
+    if (!inputData || !inputData.data || inputData.data.length === 0) {
       showError('フォーマットA入力シートにデータが存在しません。');
       return;
+    }
+    
+    // ヘッダーマッピングの検証（緩和版）
+    const headerValidation = validateHeaderMapping(inputData.headers, mappingData);
+    if (headerValidation.warnings && headerValidation.warnings.length > 0) {
+      console.warn('ヘッダー検証で警告が発生しましたが、処理を継続します:', headerValidation.warnings);
     }
     
     // フォーマットB出力シートの準備
@@ -104,7 +124,7 @@ function getInputData() {
   const lastCol = inputSheet.getLastColumn();
   
   if (lastRow <= 1) {
-    return []; // ヘッダー行のみまたはデータなし
+    return { headers: [], data: [] }; // ヘッダー行のみまたはデータなし
   }
   
   // ヘッダー行とデータ行を取得
@@ -113,6 +133,9 @@ function getInputData() {
   
   const headers = headerRange.getValues()[0];
   const data = dataRange.getValues();
+  
+  // 緩和版：空欄データも許容し、そのまま返す
+  // データのフィルタリングは行わない
   
   // ヘッダー情報を含むオブジェクト形式で返す
   return {
@@ -145,17 +168,17 @@ function prepareOutputSheet() {
 
 /**
  * ヘッダー行の作成
- * @param {Array<Array>} mappingData マッピングデータ
+ * @param {Array<Object>} mappingData マッピングデータ
  * @return {Array} フォーマットBのヘッダー配列
  */
 function createHeaderRow(mappingData) {
-  return mappingData.map(mapping => mapping[1]); // B列（フォーマットB項目名）
+  return mappingData.map(mapping => mapping.targetField);
 }
 
 /**
  * データの変換
  * @param {Object} inputData 入力データ（headers, data）
- * @param {Array<Array>} mappingData マッピングデータ
+ * @param {Array<Object>} mappingData マッピングデータ
  * @return {Array<Array>} 変換されたデータ
  */
 function convertData(inputData, mappingData) {
@@ -166,17 +189,8 @@ function convertData(inputData, mappingData) {
     const convertedRow = [];
     
     for (const mapping of mappingData) {
-      const formatAColumn = mapping[0]; // A列（フォーマットA項目名）
-      const columnIndex = headers.indexOf(formatAColumn);
-      
-      if (columnIndex !== -1) {
-        // 対応する列が見つかった場合、その値を使用
-        convertedRow.push(row[columnIndex] || '');
-      } else {
-        // 対応する列が見つからない場合、空文字を設定
-        convertedRow.push('');
-        console.warn(`警告: フォーマットA項目「${formatAColumn}」が入力データに見つかりません`);
-      }
+      const convertedValue = convertFieldValue(row, headers, mapping);
+      convertedRow.push(convertedValue);
     }
     
     convertedData.push(convertedRow);

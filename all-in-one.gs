@@ -1,14 +1,31 @@
 /**
- * Googleスプレッドシート フォーマット変換ツール - 統合版
+ * Googleスプレッドシート フォーマット変換ツール - 統合版 v2.0.2
  * 
  * このファイル1つで全ての機能を利用できます。
  * Google Apps Scriptエディタにこのコードをコピー&ペーストしてください。
+ * 
+ * 機能:
+ * - 基本的な1対1フィールドマッピング
+ * - 複数フィールド結合機能（フィールド1+フィールド2+フィールド3）
+ * - 固定値設定機能（[FIXED:値]）
+ * - 2列・4列マッピング形式の両方に対応
+ * - 自動的な後方互換性
+ * - 緩和されたバリデーション（文字種制限なし）
+ * - 空値データの許容
+ * - 不存在フィールドの警告表示（エラーにしない）
+ * - 選択的マッピング（OUTPUTフィールドが空の場合はスキップ）
  * 
  * 使用方法:
  * 1. Googleスプレッドシートで「拡張機能」→「Apps Script」を選択
  * 2. このファイルの内容を全てコピーしてApps Scriptエディタに貼り付け
  * 3. ファイルを保存
  * 4. スプレッドシートに戻ると「📊 フォーマット変換ツール」メニューが追加されます
+ * 
+ * 更新履歴:
+ * - v2.0.2: 選択的マッピング機能追加（OUTPUTフィールドが空の場合はスキップ）
+ * - v2.0.1: バリデーション緩和、空値許容、不存在フィールド対応
+ * - v2.0.0: 拡張機能統合、複数フィールド結合、固定値設定機能追加
+ * - v1.0.0: 基本的なフォーマット変換機能
  */
 
 // ===============================
@@ -54,10 +71,11 @@ function executeFormatConversion() {
     
     // フォーマットA入力データの取得
     const inputData = getInputData();
-    if (!inputData || inputData.length === 0) {
-      showError('フォーマットA入力シートにデータが存在しません。');
+    if (!inputData) {
+      showError('フォーマットA入力シートにヘッダー行が存在しません。');
       return;
     }
+    // データ行が空でも処理継続（ヘッダーのみでも可）
     
     // フォーマットB出力シートの準備
     const outputSheet = prepareOutputSheet();
@@ -115,16 +133,21 @@ function getInputData() {
   const lastRow = inputSheet.getLastRow();
   const lastCol = inputSheet.getLastColumn();
   
-  if (lastRow <= 1) {
-    return null; // ヘッダー行のみまたはデータなし
+  if (lastRow < 1) {
+    return null; // シート自体にデータなし
   }
   
-  // ヘッダー行とデータ行を取得
+  // ヘッダー行を取得
   const headerRange = inputSheet.getRange(1, 1, 1, lastCol);
-  const dataRange = inputSheet.getRange(2, 1, lastRow - 1, lastCol);
-  
   const headers = headerRange.getValues()[0];
-  const data = dataRange.getValues();
+  
+  // データ行の取得（空でも許容）
+  let data = [];
+  if (lastRow > 1) {
+    const dataRange = inputSheet.getRange(2, 1, lastRow - 1, lastCol);
+    data = dataRange.getValues();
+  }
+  // ヘッダーのみでデータ行が空の場合もdata=[]として処理継続
   
   // ヘッダー情報を含むオブジェクト形式で返す
   return {
@@ -157,17 +180,17 @@ function prepareOutputSheet() {
 
 /**
  * ヘッダー行の作成
- * @param {Array<Array>} mappingData マッピングデータ
+ * @param {Array<Object>} mappingData マッピングデータ
  * @return {Array} フォーマットBのヘッダー配列
  */
 function createHeaderRow(mappingData) {
-  return mappingData.map(mapping => mapping[1]); // B列（フォーマットB項目名）
+  return mappingData.map(mapping => mapping.targetField);
 }
 
 /**
  * データの変換
  * @param {Object} inputData 入力データ（headers, data）
- * @param {Array<Array>} mappingData マッピングデータ
+ * @param {Array<Object>} mappingData マッピングデータ
  * @return {Array<Array>} 変換されたデータ
  */
 function convertData(inputData, mappingData) {
@@ -178,17 +201,8 @@ function convertData(inputData, mappingData) {
     const convertedRow = [];
     
     for (const mapping of mappingData) {
-      const formatAColumn = mapping[0]; // A列（フォーマットA項目名）
-      const columnIndex = headers.indexOf(formatAColumn);
-      
-      if (columnIndex !== -1) {
-        // 対応する列が見つかった場合、その値を使用
-        convertedRow.push(row[columnIndex] || '');
-      } else {
-        // 対応する列が見つからない場合、空文字を設定
-        convertedRow.push('');
-        console.warn(`警告: フォーマットA項目「${formatAColumn}」が入力データに見つかりません`);
-      }
+      const convertedValue = convertFieldValue(row, headers, mapping);
+      convertedRow.push(convertedValue);
     }
     
     convertedData.push(convertedRow);
@@ -203,7 +217,13 @@ function convertData(inputData, mappingData) {
 
 /**
  * 項目マッピングシートからマッピングデータを取得
- * @return {Array<Array>} マッピングデータ [[フォーマットA項目, フォーマットB項目], ...]
+ * @return {Array<Object>} マッピングデータ配列
+ * 各要素: {
+ *   sourceFields: Array<string>,  // ソースフィールド名配列
+ *   targetField: string,          // ターゲットフィールド名
+ *   type: string,                 // 変換タイプ ('NORMAL', 'CONCAT', 'FIXED')
+ *   config: Object                // 設定値 (separator, fixedValue等)
+ * }
  */
 function getMappingData() {
   try {
@@ -222,18 +242,42 @@ function getMappingData() {
       return [];
     }
     
-    // A列とB列のデータを取得（2行目から開始、ヘッダー行をスキップ）
-    const range = mappingSheet.getRange(2, 1, lastRow - 1, 2);
+    const lastCol = mappingSheet.getLastColumn();
+    const columnCount = Math.max(lastCol, 4); // 最低4列確保
+    
+    // 全データを取得（2行目から開始、ヘッダー行をスキップ）
+    const range = mappingSheet.getRange(2, 1, lastRow - 1, columnCount);
     const values = range.getValues();
     
-    // 空行や不正なデータをフィルタリング
-    const validMappings = values.filter(row => {
-      return row[0] && row[1] && // 両方の列に値が存在
-             typeof row[0] === 'string' && 
-             typeof row[1] === 'string' &&
-             row[0].trim() !== '' && 
-             row[1].trim() !== '';
-    });
+    // 空行や不正なデータをフィルタリング & 構造化
+    const validMappings = [];
+    
+    for (let i = 0; i < values.length; i++) {
+      const row = values[i];
+      const [sourceFieldsStr, targetField, conversionType, configValue] = row;
+      
+      // ソースフィールドのみ必須チェック（ターゲットフィールドは空でも可）
+      if (!sourceFieldsStr || 
+          typeof sourceFieldsStr !== 'string' ||
+          sourceFieldsStr.trim() === '') {
+        continue;
+      }
+      
+      // ターゲットフィールドが空の場合はスキップ（エラーにしない）
+      if (!targetField || 
+          typeof targetField !== 'string' ||
+          targetField.trim() === '') {
+        console.log(`行 ${i + 2}: ターゲットフィールドが空のためスキップします（ソース: ${sourceFieldsStr}）`);
+        continue;
+      }
+      
+      // マッピング情報の構造化
+      const mappingInfo = parseMappingRow(sourceFieldsStr.trim(), targetField.trim(), conversionType, configValue);
+      
+      if (mappingInfo) {
+        validMappings.push(mappingInfo);
+      }
+    }
     
     if (validMappings.length === 0) {
       console.warn('有効なマッピングデータが見つかりません');
@@ -250,46 +294,159 @@ function getMappingData() {
 }
 
 /**
- * マッピングデータの妥当性を検証
- * @param {Array<Array>} mappingData マッピングデータ
+ * マッピング行の解析
+ * @param {string} sourceFieldsStr ソースフィールド文字列
+ * @param {string} targetField ターゲットフィールド名
+ * @param {string} conversionType 変換タイプ（オプション）
+ * @param {string} configValue 設定値（オプション）
+ * @return {Object|null} 解析されたマッピング情報
+ */
+function parseMappingRow(sourceFieldsStr, targetField, conversionType, configValue) {
+  try {
+    let mappingInfo = {
+      sourceFields: [],
+      targetField: targetField,
+      type: 'NORMAL',
+      config: {}
+    };
+    
+    // 固定値の判定
+    if (sourceFieldsStr.startsWith('[FIXED') && sourceFieldsStr.includes(']')) {
+      mappingInfo.type = 'FIXED';
+      
+      // [FIXED:値] 形式から値を抽出
+      const match = sourceFieldsStr.match(/\[FIXED(?::(.+))?\]/);
+      if (match && match[1]) {
+        mappingInfo.config.fixedValue = match[1];
+      } else if (configValue) {
+        mappingInfo.config.fixedValue = configValue.toString();
+      } else {
+        mappingInfo.config.fixedValue = '';
+      }
+      
+      mappingInfo.sourceFields = [];
+      
+    } else if (sourceFieldsStr.includes('+')) {
+      // 複数フィールド結合の判定
+      mappingInfo.type = 'CONCAT';
+      mappingInfo.sourceFields = sourceFieldsStr.split('+').map(field => field.trim()).filter(field => field.length > 0);
+      
+      // 区切り文字の設定（デフォルト：空文字）
+      mappingInfo.config.separator = configValue && configValue.toString() || '';
+      
+    } else {
+      // 通常のマッピング
+      mappingInfo.type = 'NORMAL';
+      mappingInfo.sourceFields = [sourceFieldsStr];
+    }
+    
+    // 変換タイプが明示的に指定されている場合は上書き
+    if (conversionType && typeof conversionType === 'string' && conversionType.trim() !== '') {
+      const specifiedType = conversionType.trim().toUpperCase();
+      if (['NORMAL', 'CONCAT', 'FIXED'].includes(specifiedType)) {
+        mappingInfo.type = specifiedType;
+      }
+    }
+    
+    return mappingInfo;
+    
+  } catch (error) {
+    console.error(`マッピング行の解析エラー: ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * 単一フィールドの値を変換
+ * @param {Array} inputRow 入力行データ
+ * @param {Array<string>} headers ヘッダー配列
+ * @param {Object} mapping マッピング情報
+ * @return {string} 変換後の値
+ */
+function convertFieldValue(inputRow, headers, mapping) {
+  switch (mapping.type) {
+    case 'FIXED':
+      return mapping.config.fixedValue || '';
+      
+    case 'CONCAT':
+      const values = [];
+      for (const sourceField of mapping.sourceFields) {
+        const columnIndex = headers.indexOf(sourceField);
+        if (columnIndex !== -1) {
+          const value = inputRow[columnIndex];
+          // 空値（null, undefined, ''）も許容し、空文字として処理
+          if (value !== null && value !== undefined) {
+            values.push(value.toString());
+          }
+        }
+        // フィールドが存在しない場合は無視（エラーにしない）
+      }
+      return values.join(mapping.config.separator || '');
+      
+    case 'NORMAL':
+    default:
+      if (mapping.sourceFields.length > 0) {
+        const sourceField = mapping.sourceFields[0];
+        const columnIndex = headers.indexOf(sourceField);
+        if (columnIndex !== -1) {
+          const value = inputRow[columnIndex];
+          // 空値も許容
+          return value !== null && value !== undefined ? value.toString() : '';
+        }
+      }
+      // フィールドが存在しない場合は空文字を返す
+      return '';
+  }
+}
+
+/**
+ * マッピングデータの妥当性を検証（緩和版）
+ * @param {Array<Object>} mappingData マッピングデータ
  * @return {Object} 検証結果 {isValid: boolean, errors: Array<string>}
  */
 function validateMappingData(mappingData) {
   const errors = [];
-  const formatAItems = new Set();
-  const formatBItems = new Set();
+  const targetFields = new Set();
   
   for (let i = 0; i < mappingData.length; i++) {
-    const [formatA, formatB] = mappingData[i];
-    const rowNumber = i + 1;
+    const mapping = mappingData[i];
+    const rowNumber = i + 2; // ヘッダー行を考慮
     
-    // フォーマットA項目の重複チェック
-    if (formatAItems.has(formatA)) {
-      errors.push(`行${rowNumber}: フォーマットA項目「${formatA}」が重複しています`);
+    // ターゲットフィールドの重複チェック
+    if (targetFields.has(mapping.targetField)) {
+      errors.push(`行${rowNumber}: フォーマットB項目「${mapping.targetField}」が重複しています`);
     } else {
-      formatAItems.add(formatA);
+      targetFields.add(mapping.targetField);
     }
     
-    // フォーマットB項目の重複チェック
-    if (formatBItems.has(formatB)) {
-      errors.push(`行${rowNumber}: フォーマットB項目「${formatB}」が重複しています`);
-    } else {
-      formatBItems.add(formatB);
+    // 文字種制限と長さ制限を除去（緩和）
+    // フィールド名の妥当性チェックは実施しない
+    
+    // タイプ別の検証
+    switch (mapping.type) {
+      case 'NORMAL':
+        if (mapping.sourceFields.length !== 1) {
+          errors.push(`行${rowNumber}: NORMAL タイプでは1つのソースフィールドが必要です`);
+        }
+        break;
+        
+      case 'CONCAT':
+        if (mapping.sourceFields.length < 2) {
+          errors.push(`行${rowNumber}: CONCAT タイプでは複数のソースフィールドが必要です`);
+        }
+        break;
+        
+      case 'FIXED':
+        if (!mapping.config.fixedValue && mapping.config.fixedValue !== '') {
+          errors.push(`行${rowNumber}: FIXED タイプでは固定値の設定が必要です`);
+        }
+        break;
+        
+      default:
+        errors.push(`行${rowNumber}: 不明な変換タイプ「${mapping.type}」です`);
     }
     
-    // 項目名の妥当性チェック
-    if (formatA.length > 100) {
-      errors.push(`行${rowNumber}: フォーマットA項目名が長すぎます（100文字以内）`);
-    }
-    
-    if (formatB.length > 100) {
-      errors.push(`行${rowNumber}: フォーマットB項目名が長すぎます（100文字以内）`);
-    }
-    
-    // 特殊文字のチェック（フォーマットB項目名）
-    if (!/^[a-zA-Z0-9_]+$/.test(formatB)) {
-      errors.push(`行${rowNumber}: フォーマットB項目名「${formatB}」に使用できない文字が含まれています（英数字とアンダースコアのみ）`);
-    }
+    // ソースフィールド名の制限を除去（緩和）
   }
   
   return {
@@ -299,33 +456,42 @@ function validateMappingData(mappingData) {
 }
 
 /**
- * フォーマットA入力シートのヘッダーとマッピングデータの整合性をチェック
+ * フォーマットA入力シートのヘッダーとマッピングデータの整合性をチェック（緩和版）
  * @param {Array<string>} inputHeaders 入力シートのヘッダー
- * @param {Array<Array>} mappingData マッピングデータ
+ * @param {Array<Object>} mappingData マッピングデータ
  * @return {Object} チェック結果 {isValid: boolean, missingColumns: Array<string>, warnings: Array<string>}
  */
 function validateHeaderMapping(inputHeaders, mappingData) {
   const missingColumns = [];
   const warnings = [];
+  const usedHeaders = new Set();
   
   for (const mapping of mappingData) {
-    const formatAColumn = mapping[0];
+    // 固定値の場合はヘッダーチェック不要
+    if (mapping.type === 'FIXED') {
+      continue;
+    }
     
-    if (!inputHeaders.includes(formatAColumn)) {
-      missingColumns.push(formatAColumn);
+    // ソースフィールドの存在チェック（エラーではなく警告として処理）
+    for (const sourceField of mapping.sourceFields) {
+      if (!inputHeaders.includes(sourceField)) {
+        warnings.push(`マッピングで指定された項目「${sourceField}」が入力シートに見つかりません`);
+      } else {
+        usedHeaders.add(sourceField);
+      }
     }
   }
   
   // 入力シートにあるがマッピングにない列をチェック
   for (const header of inputHeaders) {
-    const isMapped = mappingData.some(mapping => mapping[0] === header);
-    if (!isMapped) {
-      warnings.push(`入力シートの列「${header}」はマッピングに定義されていません`);
+    if (!usedHeaders.has(header)) {
+      warnings.push(`【警告】入力シートの列「${header}」はマッピングに定義されていません（この列は出力されません）`);
     }
   }
   
+  // 緩和版では常にvalidとして処理継続
   return {
-    isValid: missingColumns.length === 0,
+    isValid: true,  // 常にtrueにして処理継続
     missingColumns: missingColumns,
     warnings: warnings
   };
@@ -334,7 +500,7 @@ function validateHeaderMapping(inputHeaders, mappingData) {
 /**
  * データ変換のプレビューを生成（デバッグ用）
  * @param {Object} inputData 入力データ
- * @param {Array<Array>} mappingData マッピングデータ
+ * @param {Array<Object>} mappingData マッピングデータ
  * @param {number} maxRows プレビューする最大行数（デフォルト: 5）
  * @return {Object} プレビューデータ
  */
@@ -343,7 +509,7 @@ function generateConversionPreview(inputData, mappingData, maxRows = 5) {
   const previewData = {
     mappingInfo: mappingData,
     inputHeaders: headers,
-    outputHeaders: mappingData.map(mapping => mapping[1]),
+    outputHeaders: mappingData.map(mapping => mapping.targetField),
     sampleData: []
   };
   
@@ -354,14 +520,8 @@ function generateConversionPreview(inputData, mappingData, maxRows = 5) {
     const outputRow = [];
     
     for (const mapping of mappingData) {
-      const formatAColumn = mapping[0];
-      const columnIndex = headers.indexOf(formatAColumn);
-      
-      if (columnIndex !== -1) {
-        outputRow.push(inputRow[columnIndex] || '');
-      } else {
-        outputRow.push('');
-      }
+      const convertedValue = convertFieldValue(inputRow, headers, mapping);
+      outputRow.push(convertedValue);
     }
     
     previewData.sampleData.push({
@@ -503,7 +663,7 @@ function validateMappingSetup() {
       return;
     }
     
-    // フォーマットA入力シートとの整合性チェック
+    // フォーマットA入力シートとの整合性チェック（緩和版）
     const inputData = getInputData();
     if (inputData && inputData.headers && inputData.headers.length > 0) {
       const headerValidation = validateHeaderMapping(inputData.headers, mappingData);
@@ -512,24 +672,18 @@ function validateMappingSetup() {
       message += `✅ マッピング項目数: ${mappingData.length}件\n`;
       message += `✅ 入力シート列数: ${inputData.headers.length}件\n\n`;
       
-      if (!headerValidation.isValid) {
-        message += '⚠️ 以下の項目が入力シートに見つかりません:\n';
-        message += headerValidation.missingColumns.map(col => `  - ${col}`).join('\n');
-        message += '\n\n';
-      }
-      
+      // 緩和版では不存在項目もエラーではなく警告として表示
       if (headerValidation.warnings.length > 0) {
-        message += '📝 注意事項:\n';
+        message += '⚠️ 警告事項（処理は正常に継続されます）:\n';
         message += headerValidation.warnings.map(warning => `  - ${warning}`).join('\n');
         message += '\n\n';
       }
       
-      if (headerValidation.isValid && headerValidation.warnings.length === 0) {
-        message += '✅ すべての検証に合格しました！';
-        showSuccess(message);
-      } else {
-        showWarning(message);
-      }
+      message += '✅ 検証完了\n';
+      message += headerValidation.warnings.length > 0 ? 
+        '📝 警告がありますが、処理は正常に実行されます。' : 
+        '📝 すべてのチェックに合格しました。';
+      showSuccess(message);
     } else {
       showSuccess(`マッピングデータの検証に合格しました。\n項目数: ${mappingData.length}件\n\nフォーマットA入力シートにデータを追加してから再度検証することをお勧めします。`);
     }
@@ -562,8 +716,13 @@ function showConversionPreview() {
     
     // フォーマットA入力データの取得
     const inputData = getInputData();
-    if (!inputData || inputData.data.length === 0) {
-      showError('フォーマットA入力シートにデータが存在しません。');
+    if (!inputData) {
+      showError('フォーマットA入力シートにヘッダー行が存在しません。');
+      return;
+    }
+    
+    if (inputData.data.length === 0) {
+      showWarning('フォーマットA入力シートにデータ行がありません（ヘッダーのみ）。\nデータを追加してから再度プレビューしてください。');
       return;
     }
     
@@ -614,26 +773,25 @@ function showSheetCreationHelp() {
     `2️⃣ ${SHEET_NAMES.MAPPING}:\n` +
     `   • シート名: 「${SHEET_NAMES.MAPPING}」\n` +
     `   • A列: フォーマットAの項目名\n` +
-    `   • B列: フォーマットBの項目名\n\n` +
+    `   • B列: フォーマットBの項目名\n` +
+    `   • C列: 変換タイプ（オプション）\n` +
+    `   • D列: 設定値（オプション）\n\n` +
     
-    `📋 マッピングシートの例（ヘッダーあり）:\n` +
-    `   A1: フォーマットA項目名  B1: フォーマットB項目名\n` +
-    `   A2: 出荷日             B2: shipping_date\n` +
-    `   A3: 顧客名             B3: customer_name\n` +
-    `   A4: 商品コード         B4: product_code\n` +
-    `   A5: 数量              B5: quantity\n\n` +
-    
-    `📋 マッピングシートの例（ヘッダーなし）:\n` +
+    `📋 基本マッピング例:\n` +
     `   A1: 出荷日             B1: shipping_date\n` +
-    `   A2: 顧客名             B2: customer_name\n` +
-    `   A3: 商品コード         B3: product_code\n` +
-    `   A4: 数量              B4: quantity\n\n` +
+    `   A2: 顧客名             B2: customer_name\n\n` +
+    
+    `📋 拡張マッピング例:\n` +
+    `   A1: 住所1+住所2+住所3   B1: full_address    C1: CONCAT   D1: 、\n` +
+    `   A2: [FIXED:処理済み]    B2: status          C2: FIXED    D2:\n` +
+    `   A3: [FIXED]           B3: created_by      C3: FIXED    D3: システム\n\n` +
     
     `⚠️ 注意事項:\n` +
     `   • シート名は正確に入力してください\n` +
     `   • フォーマットB項目名は英数字とアンダースコアのみ使用\n` +
     `   • 重複する項目名は設定しないでください\n` +
-    `   • ヘッダー行は自動検出されます`;
+    `   • ヘッダー行は自動検出されます\n` +
+    `   • 2列・4列どちらの形式でも動作します`;
   
   showSuccess(message);
 }
@@ -653,14 +811,20 @@ function showUsageGuide() {
     `   • 「変換プレビュー」で結果を確認\n` +
     `   • 「フォーマット変換実行」で変換実行\n\n` +
     
-    `3️⃣ 結果確認:\n` +
+    `3️⃣ 拡張機能:\n` +
+    `   • 複数フィールド結合: フィールド1+フィールド2+フィールド3\n` +
+    `   • 固定値設定: [FIXED:値] または [FIXED]\n` +
+    `   • 区切り文字指定: 設定値列で区切り文字を指定\n\n` +
+    
+    `4️⃣ 結果確認:\n` +
     `   • フォーマットB出力シートが自動生成されます\n` +
     `   • 変換されたデータを確認してください\n\n` +
     
     `🔧 トラブルシューティング:\n` +
     `   • エラーが出る場合は「マッピング検証」を実行\n` +
     `   • シート名が正確か確認\n` +
-    `   • データの形式が正しいか確認`;
+    `   • データの形式が正しいか確認\n` +
+    `   • 拡張機能の記法が正しいか確認`;
   
   showSuccess(message);
 }
@@ -669,8 +833,8 @@ function showUsageGuide() {
  * バージョン情報の表示
  */
 function showVersionInfo() {
-  const version = '1.0.0';
-  const releaseDate = '2025-06-27';
+  const version = '2.0.0';
+  const releaseDate = '2025-07-08';
   
   const message = `📱 フォーマット変換ツール\n\n` +
     `バージョン: ${version}\n` +
@@ -678,6 +842,8 @@ function showVersionInfo() {
     `🎯 主な機能:\n` +
     `   • CSVフォーマット変換\n` +
     `   • 項目マッピング設定\n` +
+    `   • 複数フィールド結合機能\n` +
+    `   • 固定値設定機能\n` +
     `   • データ検証とプレビュー\n` +
     `   • エラーハンドリング\n\n` +
     `💻 開発者: フォーマット変換チーム\n` +
