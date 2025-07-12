@@ -31,3 +31,6 @@ yarn-error.log*
 # User-specific files
 config.local.gs
 credentials.json
+
+*claude*
+*mcp*
